@@ -1,0 +1,227 @@
+```{r}
+#load packages
+library(sf)
+library(raster)
+library(dplyr)
+library(terra)
+library(tidyverse)
+library(sf)
+library(phyloseq)
+```
+
+Load in bufferzones (as both sf object & spatvector)
+```{r}
+
+#sites are stored as csv file:
+sites_locations <- read.csv("UtrechtSites_Armin.csv")
+
+#load as spatvector & project to right CRS (7415-Amersfoort) for analysis with terra package
+sites_vector <- vect(sites_locations, geom=c("Longitude", "Latitude"), crs="EPSG:4326")
+sites_vector_pr <- project(sites_vector, "EPSG:7415")
+
+#load as sf object & project to right CRS for analysis with sf package
+sites_locations_sf <- st_as_sf(sites_locations, coords = c("Longitude", "Latitude"), crs = 4326)
+sites_locations_pr <- st_transform(sites_locations_sf, crs = 7415)
+
+```
+
+load in 3DBag data and store as bag_data
+
+```{r}
+
+#open three different shapefiles, the main layer, and two layers that will serve as subsitute for 2 missing layers. 
+merged_layers_2mis <- st_read("Layer_data/small_merged_layers_2mis.shp")
+wilhelmina_subsitute <- st_read("Layer_data/wilhelmina_subsitute.shp")
+meern_subsitute <- st_read("Layer_data/meern_subsitute.shp")
+
+meern_subsitute %>% filter(type == "Building")
+merged_layers_2mis %>% 
+  filter(type == "Building")
+
+  #ajust geometry for missing tiles
+wilhelmina_subsitute$geometry <- st_geometry(wilhelmina_subsitute) + c(3000, -1000)
+meern_subsitute$geometry <- st_geometry(meern_subsitute) + c(1000, -1000)
+  
+  # Set CRS
+st_crs(wilhelmina_subsitute) <- 7415
+st_crs(meern_subsitute) <- 7415
+  
+  # Merge layers togather to form 1 shapefile
+merged_layers <- rbind(
+  merged_layers_2mis %>% dplyr::select(-c("layer", "path")),
+  wilhelmina_subsitute,
+  meern_subsitute)
+
+  #select only the attributes that are needed, filter for buildings and make the data valid. 
+bag_data <- merged_layers %>% 
+    dplyr::select(uid, type, attribut_1, attribut_2, attribut_3, attribut_4, attribut_5, attribut_6, attribut13, attribut14, attribut15, attribut16, attribut30, attribut31, attribut32) %>%
+    filter(type == "Building") %>%
+    st_make_valid()
+
+```
+
+Load in phyloseq data and store as richness_data
+
+```{r}
+
+#load in the phyloseq data as physeq
+load("input_data/Utrecht_Run1_Results_lotus2_SSU_ASVs_phyloseq.rdata")
+
+#rename phyloseq object
+SSU_phyloseq <- physeq
+
+#subset only the AMF taxa
+tax_df_amf <- subset_taxa(SSU_phyloseq, Class == "Glomeromycetes")
+
+#estimate richness per sample 
+richness_data <- estimate_richness(tax_df_amf, measures = c("Chao1", "Shannon"))
+
+#save as a data frame with right corresponding locations. 
+richness_df <- as.data.frame(richness_data)
+richness_df$SampleID <- rownames(richness_df)
+
+rownames(richness_data) <- c("C",    "GR_10", "GR_11", "GR_12", "GR_13", "GR_14", "GR_15", "GR_16", "GR_17", "GR_19", "GR_1",  "GR_20", "GR_22", "GR_25", "GR_26", "GR_28", "GR_2",  "GR_3",  "GR_4",  "GR_5", "GR_6",  "GR_7",  "GR_8",  "GR_9",  "P1",   "P2",   "P4")
+
+richness_data$Location = rownames(richness_data)
+```
+
+load in remote_sensing data from GEE as remote_sensing_data
+
+```{r}
+
+#load in GEE geotiff files as raster objects. 
+raster_layer_NDVI <- rast("input_data/Landsat8_Utrecht_NDVI_2020_2022.tif")
+raster_layer_NO2 <- rast("input_data/NO2_Utrecht.tif")
+raster_layer_WorldCover <- rast("input_data/WorldCover_Utrecht.tif")
+
+#reproject the layers of NDVI & NO2 (Worldcover has to be done within the function)
+raster_layer_NDVI <- project(raster_layer_NDVI, "EPSG:7415")
+raster_layer_NO2 <- project(raster_layer_NO2, "EPSG:7415")
+```
+
+
+
+Specify function to create csv files with the right data 
+```{r}
+process_spatial_data <- function(buffer_distance_m, output_filename) {
+  
+  
+  #make two buffers, projected and not projected because of differences in usage of geotiff data. 
+  buffers_pr <- buffer(sites_vector_pr, width = buffer_distance_m)
+  buffers_npr <- buffer(sites_vector, width = buffer_distance_m)
+  
+  #also make a buffer for the sf object. 
+  buffers_st <- st_buffer(sites_locations_pr, dist = buffer_distance_m)
+  
+  #generating 3dBAG data: 
+  
+  #do the intersection to calculate the attributes per bufferzone
+  intersection <- st_intersection(bag_data, buffers_st)
+  
+  # Convert to data frame and rename columns
+  intersection_df <- as.data.frame(intersection) %>% dplyr::select(-geometry)
+  
+  colnames(intersection_df) <- c("uid", 
+                                 "type", 
+                                 "roof_type", 
+                                 "b3_h_dak_50p", 
+                                 "b3_h_dak_70p", 
+                                 "b3_h_dak_max", 
+                                 "b3_h_dak_min", 
+                                 "b3_h_maaiveld", 
+                                 "b3_opp_buitenmuur", 
+                                 "b3_opp_dak_plat", 
+                                 "b3_opp_dak_schuin", 
+                                 "b3_opp_grond", 
+                                 "b3_volume_lod12", 
+                                 "b3_volume_lod13", 
+                                 "b3_volume_lod22", 
+                                 "Location")
+  
+  #summarize the data frame and store in another data frame where each row is a Location
+  all_features <- intersection_df %>%
+    group_by(Location) %>%
+    summarize(
+      total_surface_area = sum(as.numeric(b3_opp_grond)),
+      mean_surface_area = mean(as.numeric(b3_opp_grond)),
+      total_volume = sum(as.numeric(b3_volume_lod22)),
+      mean_volume = mean(as.numeric(b3_volume_lod22)),
+      total_hgt_roof_max = sum(as.numeric(b3_h_dak_max)),
+      mean_hgt_roof_max = mean(as.numeric(b3_h_dak_max)),
+      total_surface_roof = sum(as.numeric(b3_opp_dak_plat)),
+      mean_surface_roof = mean(as.numeric(b3_opp_dak_plat)),
+      mean_hgt_groundlevel = mean(as.numeric(b3_h_maaiveld)),
+      total_surface_walls = sum(as.numeric(b3_opp_buitenmuur)),
+      mean_surface_walls = mean(as.numeric(b3_opp_buitenmuur)),
+      pct_slanted = sum(roof_type == "slanted") / n() * 100) %>%
+    arrange(Location) %>%
+    mutate(Category = case_when(
+      grepl("^P.+", Location) ~ "Park",
+      grepl("^GR_.+", Location) ~ "Roof",
+      grepl("^U.+", Location) ~ "Control"))
+
+  #generate geotiff data:
+  
+  #do the same intersection but instead use the extract command. 
+  avg_values_NDVI <- terra::extract(raster_layer_NDVI, buffers_pr, fun=mean, ID = TRUE)
+  avg_values_NO2 <- terra::extract(raster_layer_NO2, buffers_pr, fun=mean, ID = TRUE)
+  avg_values_WorldCover <- terra::extract(raster_layer_WorldCover, buffers_npr, ID = TRUE)
+
+  #create a dataframe with values of worldcover in percentages per buffer, and add NDVI and NO2 values. 
+  remote_sensing_data <- avg_values_WorldCover %>%
+    count(ID, Map) %>%
+    pivot_wider(names_from = Map, values_from = n) %>%
+    mutate(across(everything(), ~replace_na(.x, 0))) %>%
+    rename(
+      tc = `10`,
+      gl = `30`,
+      cl = `40`,
+      bu = `50`,
+      sl = `60`,
+      wa = `80`,
+      wl = `90`) %>%
+    mutate(Total = tc + gl + cl + bu + sl + wa + wl, 
+        tree_cover_pct = tc / Total * 100, 0,
+        grassland_pct = gl / Total * 100, 0,
+        cropland_pct = cl / Total * 100, 0,
+        built_up_pct = bu / Total * 100, 0,
+        sparseland_pct = sl / Total * 100, 0,
+        water_pct = wa / Total * 100, 0,
+        wetland_pct = wl / Total * 100, 0) %>%
+    dplyr::select(-c(tc, gl, cl, bu, sl, wa, wl, Total)) %>%
+    left_join(avg_values_NDVI, by = "ID") %>%
+    left_join(avg_values_NO2, by = "ID") %>%
+    dplyr::select(-ID)
+
+  remote_sensing_data$Location = buffers_pr$Location
+  
+  #join the 3dbag data, the phyloseq sample data & geotiff data together for one large dataframe.  
+  all_features <- inner_join(all_features, richness_data, by = "Location") %>% inner_join(remote_sensing_data, by = "Location")
+  #all_features <- inner_join(all_features, remote_sensing_data, by = "Location")
+  
+  # Write to CSV
+  write.csv(all_features, output_filename, row.names = FALSE)
+}
+
+```
+
+```{r}
+# Define the list of buffer distances in meters
+buffer_distances_m <- c(2500)
+
+# Loop through each buffer distance
+for (distance in buffer_distances_m) {
+  # Define the output filename based on the buffer distance
+  output_filename <- sprintf("intersection_%dm_df.csv", distance)
+  
+  # Call the process_spatial_data function with the current distance and output filename
+  process_spatial_data(distance, output_filename)
+  
+  #save object as all_features
+  #sprintf("intersection_%dm_df", distance) <- all_features
+}
+
+
+
+```
+

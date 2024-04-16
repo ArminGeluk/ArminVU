@@ -1,0 +1,230 @@
+Loading in the phyloseq data
+
+```{r}
+
+#loading in the dataset 
+load("input_data/Utrecht_Run1_Results_lotus2_SSU_ASVs_phyloseq.rdata")
+
+#rename phyloseq object
+SSU_phyloseq <- physeq
+
+#subset only the AMF taxa
+tax_df_amf <- subset_taxa(SSU_phyloseq, Class == "Glomeromycetes")
+
+#estimate richness per sample 
+richness_data <- estimate_richness(tax_df_amf, measures = c("Chao1", "Shannon"))
+
+#save as a data frame with right corresponding locations, since the names differ from the names used in the other analysis. 
+richness_df <- as.data.frame(richness_data)
+richness_df$SampleID <- rownames(richness_df)
+
+rownames(richness_data) <- c("C",    "GR_10", "GR_11", "GR_12", "GR_13", "GR_14", "GR_15", "GR_16", "GR_17", "GR_19", "GR_1",  "GR_20", "GR_22", "GR_25", "GR_26", "GR_28", "GR_2",  "GR_3",  "GR_4",  "GR_5", "GR_6",  "GR_7",  "GR_8",  "GR_9",  "P1",   "P2",   "P4")
+
+richness_data$Location = rownames(richness_data)
+
+```
+Extraction of Richness per sample
+```{r}
+
+#estimate the richness from the tax_df_amf file
+richness_data <- estimate_richness(tax_df_amf, measures = c("Chao1", "Shannon"))
+
+#convert it to a data frame and ajust rownames
+richness_df <- as.data.frame(richness_data)
+richness_df$SampleID <- rownames(richness_df)
+
+#rename rownames because they are different in the other analyses
+rownames(richness_data) <- c("C",    "GR_10", "GR_11", "GR_12", "GR_13", "GR_14", "GR_15", "GR_16", "GR_17", "GR_19", "GR_1",  "GR_20", "GR_22", "GR_25", "GR_26", "GR_28", "GR_2",  "GR_3",  "GR_4",  "GR_5", "GR_6",  "GR_7",  "GR_8",  "GR_9",  "P1",   "P2",   "P4")
+
+#rename column "Location" for inner_join. 
+richness_data$Location = rownames(richness_data)
+```
+Extracting spore size data
+
+```{r}
+#load sporesize database
+spore_database <- read.csv("spore_database.csv")
+
+#extract the taxonomy table as a data frame.
+tax_df <- as.data.frame(tax_table(tax_df_amf))
+
+#extract the OTU-table as a data frame.
+otu_df <- as.data.frame(otu_table(tax_df_amf))
+
+#name a new column with the OTU's, which are similar to the rownames. 
+otu_df$OTU <- rownames(otu_df)
+
+#change "?" to NA, since it can't be used, as well as "sp.", since it corresponds to the previous rank anyways.
+tax_df <- tax_df %>%
+  mutate(across(everything(), ~na_if(., "?"))) %>%
+  mutate(Species = if_else(str_detect(Species, "sp\\."), NA_character_, Species))
+  mutate()
+
+
+#iterate over the dataframe and store the name of the lowest available rank name in new_taxon_names.
+new_taxon_names <- sapply(seq_along(otu_df$OTU), function(i) {
+  x <- tax_df[i, ]
+  name_part <- if (!is.na(x['Species'])) {
+    x['Species']
+  } else if (!is.na(x['Genus'])) {
+    x['Genus']
+  } else if (!is.na(x['Family'])) {
+    x['Family']
+  } else if (!is.na(x['Order'])) {
+    x['Order']
+  } else if (!is.na(x['Class'])) {
+    x['Class']
+  } else {
+    "Unknown"
+  }
+    if (name_part != "Unknown") {
+    paste(name_part)
+  } else {
+    otu_df$OTU[i]
+  }
+})
+
+#add the new taxon names to the df
+tax_df$names <- new_taxon_names
+
+#manually change three taxon names correctly, since they are incorrect.
+tax_df$names[2] <- "Archaeosporaceae"
+tax_df$names[4] <- "Claroideoglomus"
+tax_df$names[c(29, 60)] <- "Glomeromycetes"
+
+
+
+#merge the just adjusted taxonomy dataframe with the otu dataframe. Now, the OTU table is recreated but has the right names. 
+taxname_df <- merge(tax_df, otu_df, by = 0) 
+
+#remove all unused columns, such as the ones in the tax_table (besides the right names that were just generated)
+taxname_df <- taxname_df[9:37]
+
+#calculate the means for each genus, to be used later as an average.
+genus_means <- spore_database %>% 
+  mutate(names = sapply(str_split(good.names, "_"), `[`, 1)) %>% 
+  group_by(names) %>% 
+  filter(!is.na(SporeVolume)) %>%
+  summarize(mean_vol = mean(SporeVolume))
+
+#calculate the means for each family
+family_means <- spore_database %>% 
+  rename(names = Family) %>%
+  group_by(names) %>% 
+  filter(!is.na(SporeVolume)) %>%
+  summarize(mean_vol = mean(SporeVolume))
+
+#calculate the means for each order
+order_means <- spore_database %>% 
+  rename(names = Order) %>%
+  group_by(names) %>% 
+  filter(!is.na(SporeVolume)) %>%
+  summarize(mean_vol = mean(SporeVolume))
+
+#if the names of the genus in the taxname table correspond with the names on the genus_means table, add the genus_means value to the taxname table
+taxmean_df <- left_join(taxname_df, genus_means, by = "names")
+
+#do the same for family, the average value will be added to the table if the name corresponds to the name in the taxname table.
+taxmean_df <- left_join(taxmean_df, family_means, by = "names")
+
+#do the same for order
+taxmean_df <- left_join(taxmean_df, order_means, by = "names")
+
+#manually add the species data, since it is written in another format, so left_join doesn't work. Also, for some other names, they do not allign with the names in the means dataframes, so manually add them. 
+taxmean_df <- taxmean_df %>% 
+  mutate(mean_vol = if_else(names == "lamellosa", genus_means$mean_vol[11], mean_vol),
+         mean_vol = if_else(names == "Archaeospora trappei", spore_database$SporeVolume[66], mean_vol),
+         mean_vol = if_else(names == "Glomus_sensu_lato", genus_means$mean_vol[16], mean_vol),
+         mean_vol = if_else(names == "Glomeromycetes", mean(order_means$mean_vol), mean_vol),
+         mean_vol = if_else(names == "Glomeromycotina sp.", mean(order_means$mean_vol), mean_vol),
+#because it saves the means in three different columns, coalesce(merge) the columns to one column & delete the others. 
+         mean_volume = coalesce(mean_vol, mean_vol.x, mean_vol.y)) %>%
+  dplyr::select(-c(mean_vol, mean_vol.x, mean_vol.y))
+
+#save as a long dataframe, so that each name has its corresponding sample name and total counts(which is all the sporesize means added to each other)
+long_taxmean <- taxmean_df %>% 
+  dplyr::select(Row.names) %>%
+  pivot_longer(cols = -c(names, mean_volume, OTU), names_to = "Sample_Location", values_to = "Count")
+
+#finalise the dataframe so that it gives for each sample name the right average spore size. which is counted by adding all the mean sporesizes and dividing them by the total found samples. 
+sporesize_data <- long_taxmean %>%
+  mutate(total_volume = mean_volume * Count) %>%
+  group_by(Sample_Location) %>%
+  summarise(sum_total_volume = sum(total_volume), sum_count = sum(Count),
+            Average_spore_size = sum_total_volume / sum_count)
+
+#again, rename the Location column. 
+sporesize_data$Location <- c("C",    "GR_10", "GR_11", "GR_12", "GR_13", "GR_14", "GR_15", "GR_16", "GR_17", "GR_19", "GR_1",  "GR_20", "GR_22", "GR_25", "GR_26", "GR_28", "GR_2",  "GR_3",  "GR_4",  "GR_5", "GR_6",  "GR_7",  "GR_8",  "GR_9",  "P1",   "P2",   "P4")
+```
+
+Counting on which rank the sporesize was calculated 
+```{r}
+taxtib <- tibble(rank = c("Class", "Order", "Family", "Genus", "Species"), times_ranked = c(sum(na.omit(tax_df_sp$rankedbyclass)), sum(na.omit(tax_df_sp$rankedbyorder)), sum(na.omit(tax_df_sp$rankedbyfamily)), sum(na.omit(tax_df_sp$rankedbygenus)), sum(na.omit((tax_df_sp$rankedbyspecies)))))
+
+
+tax_df[tax_df == "Glomeromycotina sp."] <- NA
+tax_df$names[c(29, 60)] <- "Glomeromycetes"
+tax_df$names[2] <- "Archaeosporaceae"
+
+tax_df_sp <- tax_df %>% 
+  mutate(rankedbyspecies = if_else(names == Species, 1, 0)) %>%
+  mutate(rankedbygenus = if_else(names == Genus, 1, 0)) %>%
+  mutate(rankedbyfamily = if_else(names == Family, 1, 0)) %>%
+  mutate(rankedbyorder = if_else(names == Order, 1, 0)) %>%
+  mutate(rankedbyclass = if_else(names == Class, 1, 0))
+
+
+
+```
+
+making a ggplot of sporesizes
+
+```{r}
+taxmean_df2 <- taxmean_df
+
+taxmean_df2$total_names <- apply(taxmean_df2, 1, function(row) {
+  # Extract the TaxonomyName
+  name <- row["names"]
+  
+  # Get the names of the attributes where the value is 1
+  rank <- names(row)[row == 1 & names(row) != "names"]
+  
+  # Combine the name with the attributes, separated by commas
+  paste(name, paste(rank, collapse = ", "), sep = ": ")
+})
+
+
+
+taxmean_df2[taxmean_df2 == "Glomus_sensu_lato"] <- "Glomus"
+
+taxmean_df2$names[taxmean_df2$names == "Glomerales"] <- "Glomerales Order"
+taxmean_df2$names[taxmean_df2$names == "Glomus"] <- "Glomus Genus"
+taxmean_df2$names[taxmean_df2$names == "Archaeospora trappei"] <- "Archaeospora trappei Species"
+taxmean_df2$names[taxmean_df2$names == "Claroideoglomus"] <- "Claroideoglomus Genus"
+taxmean_df2$names[taxmean_df2$names == "lamellosa"] <- "Etrophospora lamellosa Species"
+taxmean_df2$names[taxmean_df2$names == "Glomeraceae"] <- "Glomeraceae Family"
+taxmean_df2$names[taxmean_df2$names == "Claroideoglomeraceae"] <-  "Claroideoglomeraceae Family"
+taxmean_df2$names[taxmean_df2$names == "Diversisporales"] <- "Diversisporales Order"
+taxmean_df2$names[taxmean_df2$names == "Glomeromycetes"] <- "Glomeromycetes Class"
+taxmean_df2$names[taxmean_df2$names == "Scutellospora"] <- "Scutellospora Genus"
+taxmean_df2$names[taxmean_df2$names == "Archaeosporaceae"] <- "Archaeosporaceae Family"
+taxmean_df2$names[taxmean_df2$names == "Acaulosporaceae"] <- "Acaulosporaceae Family"
+taxmean_df2$names[taxmean_df2$names == "Diversispora"] <- "Diversispora Genus"
+taxmean_df2$names[taxmean_df2$names == "Archaeosporales"] <- "Archaeosporales Order"
+taxmean_df2$names[taxmean_df2$names == "Archaeospora"] <- "Archaeospora Genus"
+taxmean_df2$names[taxmean_df2$names == "Diversisporaceae"] <- "Diversisporaceae Family"
+taxmean_df2$names[taxmean_df2$names == "Acaulospora"] <- "Acaulospora Genus"
+taxmean_df2$names[taxmean_df2$names == "Entrophospora"] <- "Entrophospora Genus"
+     
+
+taxmean_df2 <- taxmean_df2 %>%
+  dplyr::select(c(names, mean_volume))
+
+
+
+
+taxmean_df2 %>%
+  arrange(desc(mean_volume)) %>%
+  ggplot(aes(x=taxmean_df2$mean_volume,y=(reorder(names, mean_volume))))+geom_point()
+```
+

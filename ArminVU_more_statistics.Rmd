@@ -1,0 +1,260 @@
+---
+title: "Building the AIC/R2 table"
+author: "Armin Geluk"
+date: "2024-03-25"
+---
+```{r}
+library(tidyverse)
+library(MASS)
+library(ranger)
+library(caret)
+library(scales)
+set.seed(18)
+```
+
+```{r}
+all_features_100 <- read.csv("intersection_100m_df.csv")
+all_features_500 <- read.csv("intersection_500m_df.csv")
+all_features_1000 <- read.csv("intersection_1000m_df.csv")
+all_features_2000 <- read.csv("intersection_2000m_df.csv")
+all_features_2500 <- read.csv("intersection_2500m_df.csv")
+
+all_features_100$radius <- c(rep("r100", nrow(all_features_100)))
+all_features_500$radius <- c(rep("r500", nrow(all_features_500)))
+all_features_1000$radius <- c(rep("r1000", nrow(all_features_1000)))
+all_features_2000$radius <- c(rep("r2000", nrow(all_features_2000)))
+all_features_2500$radius <- c(rep("r2500", nrow(all_features_2500)))
+
+
+df_100 <- inner_join(all_features_100, sporesize_data, by = "Location") %>%
+  dplyr::select(c(built_up_pct, grassland_pct, tree_cover_pct, total_surface_area, NDVI, mean_hgt_roof_max, Average_spore_size, Chao1)) %>%
+  na.omit() %>%
+  filter(row_number() <= n()-1)
+
+df_500 <- inner_join(all_features_500, sporesize_data, by = "Location") %>%
+  dplyr::select(c(built_up_pct, grassland_pct, tree_cover_pct, total_surface_area, NDVI, mean_hgt_roof_max, Average_spore_size, Chao1)) %>%
+  na.omit() %>%
+  filter(row_number() <= n()-1)
+
+df_1000 <- inner_join(all_features_1000, sporesize_data, by = "Location") %>%
+  dplyr::select(c(built_up_pct, grassland_pct, tree_cover_pct, total_surface_area, NDVI, mean_hgt_roof_max, Average_spore_size, Chao1)) %>%
+  na.omit() %>%
+  filter(row_number() <= n()-1)
+
+df_2000 <- inner_join(all_features_2000, sporesize_data, by = "Location") %>%
+  dplyr::select(c(built_up_pct, grassland_pct, tree_cover_pct, total_surface_area, NDVI, mean_hgt_roof_max, Average_spore_size, Chao1)) %>%
+  na.omit() %>%
+  filter(row_number() <= n()-1)
+
+df_2500 <- inner_join(all_features_2500, sporesize_data, by = "Location") %>%
+  dplyr::select(c(built_up_pct, grassland_pct, tree_cover_pct, total_surface_area, NDVI, mean_hgt_roof_max, Average_spore_size, Chao1)) %>%
+  na.omit() %>%
+  filter(row_number() <= n()-1)
+
+cor.test(df_2000$built_up_pct, df_2000$total_surface_area)
+
+```
+
+```{r}
+
+
+```
+
+
+```{r}
+#Average spore size stepwise regression:
+
+
+sumlist <- list()
+
+stepwise_reg_calculation <- function(input_data, response_feature) {
+  
+  rm_feature <- ifelse(response_feature == "Chao1", "Average_spore_size", "Chao1") 
+
+  input_data <- input_data %>%  
+    mutate(across(where(is.numeric), ~ log(. + 1))) %>%
+    dplyr::select(-rm_feature) %>%
+    na.omit()
+
+  # Dynamically create the formula ensuring it uses the correct environment
+  formula_text <- paste(response_feature, "~ .")
+  environment <- environment()
+
+  # Create a model with a formula that correctly identifies variables
+  first_model <- lm(as.formula(formula_text), data = input_data)
+  
+  step_model <- stepAIC(first_model, direction = "backward", trace = FALSE)
+  
+  # Recreate the best model using the final formula from stepAIC
+  best_model <- lm(formula(step_model), data = input_data)
+
+  return(best_model)
+}
+
+
+```
+
+```{r}
+
+
+
+summary(stepwise_reg_calculation(df_1000, "Average_spore_size"))
+
+radii_df <- list(df_100, df_500, df_1000, df_2000, df_2500)
+
+sumlist_sporesize <- list()
+sumlist_richness <- list()
+
+for (radius_df in radii_df) {
+  
+  model_sporesize <- stepwise_reg_calculation(radius_df, "Average_spore_size")
+  sumlist_sporesize <- append(sumlist_sporesize, list(model_sporesize))
+  
+  model_richness <- stepwise_reg_calculation(radius_df, "Chao1")
+  sumlist_richness <- append(sumlist_richness, list(model_richness))
+}
+
+summary(sumlist_sporesize[[4]])
+
+(sumlist_richness[[5]])
+
+lm(, data = input_data)
+
+```
+
+
+```{r}
+#random forest:
+
+ranfolist_sporesize <- list()
+ranfolist_richness <- list()
+
+for (radius_df in radii_df) {
+
+  df_sporesize <- radius_df %>% 
+    dplyr::select(-Chao1)%>%
+    mutate(across(where(is.numeric), ~ log(. + 1))) %>%
+    na.omit(Average_spore_size)
+#set up the model for sporesize normally
+ranfo_model_sp <- ranger(
+  formula = Average_spore_size ~ ., 
+  data = df_sporesize,
+  importance = 'permutation',scale.permutation.importance = TRUE,
+)
+
+vi <- ranfo_model_sp$variable.importance 
+vi[vi < 0] <- 0
+vi_scaled <- list((vi / sum(vi)) * 100)
+
+ranfolist_sporesize <- append(ranfolist_sporesize, vi_scaled)
+ranfolist_sporesize <- append(ranfolist_sporesize, ranfo_model_sp)
+}
+
+for (radius_df in radii_df) {
+
+  df_richness <- radius_df %>% 
+    dplyr::select(-Average_spore_size) %>%
+    mutate(across(where(is.numeric), ~ log(. + 1))) %>%
+    na.omit(Chao1)
+#set up the model for richness normally
+ranfo_model_c <- ranger(
+  formula = Chao1 ~ ., 
+  data = df_richness,
+  importance = 'permutation',scale.permutation.importance = TRUE,
+)
+
+vi <- ranfo_model_c$variable.importance 
+vi[vi < 0] <- 0
+vi_scaled <- list((vi / sum(vi)) * 100)
+
+ranfolist_richness <- append(ranfolist_richness, vi_scaled)
+ranfolist_richness <- append(ranfolist_richness, ranfo_model_c)
+}
+
+
+
+ranfolist_richness
+
+```
+
+```{r}
+# Assuming 'Target' is your outcome variable and the rest are predictors
+rf_mod <- train(Average_spore_size ~ ., data = df_2500_log_sp, 
+                method = "rf", 
+                trControl = trainControl(method = "cv", number = 10))
+
+rf_mod
+```
+
+
+```{r}
+df_1000ta <- df_1000 %>%  
+    mutate(across(where(is.numeric), ~ log(. + 1))) %>%
+    dplyr::select(-Chao1) %>%
+    na.omit()
+
+df_2000ta <- df_2000 %>%  
+    mutate(across(where(is.numeric), ~ log(. + 1))) %>%
+    dplyr::select(-Chao1) %>%
+    na.omit()
+
+df_500ta <- df_500 %>%  
+    mutate(across(where(is.numeric), ~ log(. + 1))) %>%
+    dplyr::select(-Chao1) %>%
+    na.omit()
+
+df_1000tc <- df_1000 %>%  
+    mutate(across(where(is.numeric), ~ log(. + 1))) %>%
+    dplyr::select(-Average_spore_size) %>%
+    na.omit()
+
+df_2000tc <- df_2000 %>%  
+    mutate(across(where(is.numeric), ~ log(. + 1))) %>%
+    dplyr::select(-Average_spore_size) %>%
+    na.omit()
+
+df_500tc <- df_500 %>%  
+    mutate(across(where(is.numeric), ~ log(. + 1))) %>%
+    dplyr::select(-Average_spore_size) %>%
+    na.omit()
+
+#500
+fm_500 <- lm(Average_spore_size ~., data = df_500ta)
+sm_500 <- stepAIC(fm_500, direction = "backward", trace = TRUE)
+
+#1000
+fm_1000 <- lm(Average_spore_size ~., data = df_1000ta)
+sm_1000 <- stepAIC(fm_1000, direction = "backward", trace = TRUE)
+
+#2000
+fm_2000 <- lm(Average_spore_size ~., data = df_2000ta)
+sm_2000 <- stepAIC(fm_2000, direction = "backward", trace = TRUE)
+
+bm_500a <- lm(Average_spore_size ~ total_surface_area, data = df_500ta)
+bm_1000a <- lm(Average_spore_size ~ mean_hgt_roof_max , data = df_1000ta)
+bm_2000a <- lm(Average_spore_size ~ grassland_pct , data = df_2000ta)
+
+
+
+#500
+fm_500c <- lm(Chao1 ~., data = df_500tc)
+sm_500c <- stepAIC(fm_500c, direction = "backward", trace = TRUE)
+
+#1000
+fm_1000c <- lm(Chao1 ~., data = df_1000tc)
+sm_1000c <- stepAIC(fm_1000c, direction = "backward", trace = TRUE)
+
+#2000
+fm_2000c <- lm(Chao1 ~., data = df_2000tc)
+sm_2000c <- stepAIC(fm_2000c, direction = "backward", trace = TRUE)
+
+bm_500c <- lm(Chao1 ~ tree_cover_pct, data = df_500tc)
+bm_1000c <- lm(Chao1 ~ tree_cover_pct, data = df_1000tc)
+bm_2000c <- lm(Chao1 ~ tree_cover_pct , data = df_2000tc)
+
+
+AIC(bm_500c)
+
+```
+
+

@@ -1,0 +1,69 @@
+```{r}
+library(sf)
+library(raster)
+library(dplyr)
+library(terra)
+library(tidyr)
+```
+
+
+```{r}
+#load in location data
+sites_locations <- read.csv("UtrechtSites_Armin.csv")
+
+#save as vector & project (terra package)
+sites_vector <- vect(sites_locations, geom=c("Longitude", "Latitude"), crs="EPSG:4326")
+sites_vector_pr <- project(sites_vector, "EPSG:7415")
+
+#create buffer zones around these points
+buffers_pr <- buffer(sites_vector_pr, width = 1000)
+buffers_npr <- buffer(sites_vector, width = 1000)
+
+#read the raster file and convert it to polygons 
+raster_layer_NDVI <- rast("input_data/Landsat8_Utrecht_NDVI_2020_2022.tif")
+raster_layer_NO2 <- rast("input_data/NO2_Utrecht.tif")
+raster_layer_WorldCover <- rast("input_data/WorldCover_Utrecht.tif")
+
+#project the NDVI and NO2 layers to the right crs
+raster_layer_NDVI <- project(raster_layer_NDVI, "EPSG:7415")
+raster_layer_NO2 <- project(raster_layer_NO2, "EPSG:7415")
+
+#perform the intersection with the 'extract'function
+avg_values_NDVI <- terra::extract(raster_layer_NDVI, buffers_pr, fun=mean)
+avg_values_NO2 <- terra::extract(raster_layer_NO2, buffers_pr, fun=mean)
+avg_values_WorldCover <- terra::extract(raster_layer_WorldCover, buffers_npr)
+
+#process the data. Make it a long format, rename the columns (because they have a integer as name) then calculate the percentages, and remove the temporal columns. Combine them together
+landsat_data <- avg_values_WorldCover %>%
+    count(ID, Map) %>%
+    pivot_wider(names_from = Map, values_from = n) %>%
+    rename(
+      tc = `10`,
+      gl = `30`,
+      cl = `40`,
+      bu = `50`,
+      sl = `60`,
+      wa = `80`,
+      wl = `90`) %>%
+    mutate(Total = tc + gl + cl + bu + sl + wa + wl, 
+        tree_cover_pct = tc / Total * 100, 0,
+        grassland_pct = gl / Total * 100, 0,
+        cropland_pct = cl / Total * 100, 0,
+        built_up_pct = bu / Total * 100, 0,
+        sparseland_pct = sl / Total * 100, 0,
+        water_pct = wa / Total * 100, 0,
+        wetland_pct = wl / Total * 100, 0) %>%
+    select(-c(`10`, `30`, `40`, `50`, `60`, `80`, `90`, Total, )) %>%
+    left_join(avg_values_NDVI, by = "ID") %>%
+    left_join(avg_values_NO2, by = "ID") %>%
+    select(-ID)
+
+#add Location column
+landsat_data$Location = buffers$Location
+
+#arrange them for easy joining.
+landsat_data <- arrange(landsat_data, Location)
+
+  
+```
+

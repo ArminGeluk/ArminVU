@@ -1,0 +1,157 @@
+---
+title: "graphs to use"
+author: "Armin Geluk"
+date: "2024-04-02"
+---
+
+```{r}
+set.seed(18)
+library(tidyverse)
+library(patchwork)
+library(sjPlot)
+library(ggrepel)
+library(modelbased)
+
+set.seed(18)
+```
+
+
+```{r}
+
+custom_cols <- c("#C4961A","#D16103")
+
+#df_2000 is used, but it doenst affect anything 
+p1 <- all_features_2000 %>%
+    mutate(Category = case_when(
+    grepl("^P.+", Location) ~ "Park",
+    grepl("^GR_.+", Location) ~ "Roof",
+    grepl("^U.+", Location) ~ "Control")) %>%
+  ggplot(aes(y = Chao1, x = Category, fill = Category), show.legend = F) +
+  geom_boxplot(linewidth = 0.7) + 
+  geom_jitter(width = 0.2) +
+  theme_minimal() +
+  scale_fill_manual(values = custom_cols) + 
+  labs(title = "AMF richness", x = "", y = "Chao1")
+ 
+p2 <- all_features_2000 %>%
+  inner_join(sporesize_data, by = "Location") %>%
+    mutate(Category = case_when(
+    grepl("^P.+", Location) ~ "Park",
+    grepl("^GR_.+", Location) ~ "Roof",
+    grepl("^U.+", Location) ~ "Control")) %>%
+  ggplot(aes(y = log(Average_spore_size+1), x = Category, fill = Category)) +
+  geom_boxplot(linewidth = 0.7) + 
+  geom_jitter(width = 0.2) +
+  theme_minimal() +
+  scale_fill_manual(values = custom_cols) + 
+  labs(title = "Taxa spore size", x = "", y = "Cubic um (log)")
+
+p1 + p2 + plot_layout(guides = "collect") + plot_annotation(tag_levels = c("A", "B"))
+```
+```{r}
+#calculation of stepwise regression models can be found at "stepwise regression rmd file"
+
+p3 <- plot_model(bm_500, type = "pred", color = "#F27961") + 
+  theme_minimal() + 
+  labs(x = "Building surface area \n m² (log)", y = "Spore volume \n μm³ (log)", title = "500 m") 
+
+p4 <- plot_model(bm_1000, type = "pred", color = "#F27961") + 
+  theme_minimal() + 
+  labs(x = "Roof height \n m (log)", y = "Spore volume \n μm³ (log)", title = "1000 m") 
+  
+p5 <- plot_model(bm_2000, type = "pred", color = "#6DCC19") + 
+  theme_minimal() + 
+  labs(x = "% Grassland \n (log)", y = "Spore volume \n μm³ (log)", title = "2000 m")
+  
+
+p3 + p4 + p5 + plot_annotation(
+  title = 'Marginal effects on Spore volume ',
+  tag_levels = list(c("A", "B","C")))
+
+
+
+```
+
+```{r}
+
+df_500t2 <- all_features_500 %>%
+  dplyr::select(c(built_up_pct, grassland_pct, tree_cover_pct, total_surface_area, NDVI, mean_hgt_roof_max, Category)) %>%
+  mutate(radius = c(rep("r500", nrow(all_features_500))))
+
+df_1000t2 <- all_features_1000 %>%
+  dplyr::select(c(built_up_pct, grassland_pct, tree_cover_pct, total_surface_area, NDVI, mean_hgt_roof_max, Category)) %>%
+  mutate(radius = c(rep("r1000", nrow(all_features_1000)))) 
+
+df_2000t2 <- all_features_2000 %>%
+  dplyr::select(c(built_up_pct, grassland_pct, tree_cover_pct, total_surface_area, NDVI, mean_hgt_roof_max, Category)) %>%
+  mutate(radius = c(rep("r2000", nrow(all_features_2000)))) 
+
+dft2 <- rbind(df_500t2, df_1000t2, df_2000t2)
+
+dft2_long <- dft2 %>%
+   mutate(across(where(is.numeric), ~rescale(., to = c(0, 100)))) %>%
+  pivot_longer(
+    cols = -c(Category, radius), # Exclude non-numerical columns
+    names_to = "variable",
+    values_to = "value"
+  )
+
+# Step 2: Calculate averages
+dft2_averages <- dft2_long %>%
+  group_by(radius, Category, variable) %>%
+  summarize(average = mean(value), .groups = "drop")
+
+
+ggplot(dft2_averages, aes(
+  x = average,
+  y = factor(variable, levels = c("mean_hgt_roof_max",
+                                  "total_surface_area",
+                                  "built_up_pct", 
+                                  "grassland_pct", 
+                                  "tree_cover_pct",
+                                  "NDVI")), 
+  fill = factor(radius, levels = c("r2000", "r1000", "r500")))) +  # This sets the plot order.
+  geom_col(position = "dodge", colour = "black") +
+  scale_fill_manual(values=c("#439E25", "#7FD830", "#DDF39C"), labels = c("2000 m", "1000 m", "500 m")) +
+  facet_wrap(~Category) +
+  labs(title = "Scaled variables", y = "", x = "", fill = "Radius") + 
+  scale_y_discrete(labels = c("Mean building height", "Total area build up", "% Built up", "% Grassland", "% Tree cover", "NDVI")) + 
+  theme_minimal()
+     
+```
+```{r}
+ttest_tibble <- tibble(
+  mean_volume = c(spore_database_genus$volume_combined, 
+                  taxvol_roof$mean_volume_com, 
+                  taxvol_park$mean_volume_com),
+  dataset = c(rep("full_dataset", length(spore_database_genus$volume_combined)), 
+              rep("urban", length(taxvol_roof$mean_volume_com)), 
+              rep("urban", length(taxvol_park$mean_volume_com))))
+
+
+ttest_tibble$mean_volume <- rescale(log(ttest_tibble$mean_volume))
+
+
+#calculate the log means of each dataset
+log_means <- ttest_tibble %>%
+  group_by(dataset) %>%
+  na.omit() %>%
+  summarise(log_mean_volume = mean((mean_volume)))
+
+#visualise distribution
+ttest_tibble %>%
+  ggplot(aes(x = mean_volume, fill = dataset)) + 
+  geom_density(alpha = 0.5, size = 0.7) +
+  scale_fill_manual(values = c("#DFDA33", "#F27961")) + 
+  geom_vline(aes(xintercept=log_means$log_mean_volume[1]), colour = "gray", size = 0.3) +
+  geom_vline(aes(xintercept=log_means$log_mean_volume[1]), colour = "#DFDA33", size = 0.8, linetype = "dashed") +
+  geom_vline(aes(xintercept=log_means$log_mean_volume[2]), colour = "gray", size = 0.3) +
+  geom_vline(aes(xintercept=log_means$log_mean_volume[2]), colour = "#F27961", size = 0.8, linetype = "dashed") +
+  geom_text(label = "Utrecht parks & green roofs", y = 4, x = 0.83, size = 3.6) + 
+  geom_text(label = "All AMF spores", y = 1.9, x = 0.86, size = 3.6) +
+  theme_minimal() + 
+  labs(y = "", x = "Spore volume \n (scaled and log-transformed)") +
+  guides(fill="none")
+
+```
+

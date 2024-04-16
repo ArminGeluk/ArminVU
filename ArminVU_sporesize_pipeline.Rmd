@@ -1,0 +1,170 @@
+---
+title: "Spore trait pipeline"
+author: "Armin Geluk"
+date: "2024-03-28"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(scales)
+
+spore_database <- read.csv("spore_database.csv")
+
+
+load("input_data/Utrecht_Run1_Results_lotus2_SSU_ASVs_phyloseq.rdata")
+SSU_phyloseq <- physeq
+#subset only the AMF taxa
+tax_df_amf <- subset_taxa(SSU_phyloseq, Class == "Glomeromycetes")
+
+
+#add a column with the category, e.g. park, roof and control
+SSU_phyloseq@sam_data <- data.frame(sample_data(SSU_phyloseq)) %>%
+  mutate(Category = case_when(
+    grepl("^P.+", Sample_Label) ~ "Park",
+    grepl("^GR_.+", Sample_Label) ~ "Roof",
+    grepl("C", Sample_Label) ~ "Control")) %>%
+  sample_data()
+
+
+#split the physeq object in 3 different objects based on category
+tax_df_amf <- subset_taxa(SSU_phyloseq, Class == "Glomeromycetes")
+
+SSU_park <- subset_samples(tax_df_amf, Category == "Park")
+SSU_roof <- subset_samples(tax_df_amf, Category == "Roof")
+SSU_control <- subset_samples(tax_df_amf, Category == "Control")
+
+#change the format of the spore database so that each column is a rank
+spore_database_genus <- spore_database %>% 
+  mutate(Genus = sapply(str_split(good.names, "_"), `[`, 1))
+
+#calculate average volume
+spore_database_genus$volume_combined <- (spore_database_genus$SporeVolume + spore_database_genus$SporeVolume_2) / 2
+
+#calculate genus, family and order means
+genus_means <-  spore_database_genus %>% 
+  group_by(Genus) %>% 
+  filter(!is.na(volume_combined)) %>%
+  summarize(mean_vol = mean(volume_combined))
+
+family_means <- spore_database_genus %>% 
+  group_by(Family) %>% 
+  filter(!is.na(volume_combined)) %>%
+  summarize(mean_vol = mean(volume_combined))
+
+order_means <- spore_database_genus %>% 
+  group_by(Order) %>% 
+  filter(!is.na(volume_combined)) %>%
+  summarize(mean_vol = mean(volume_combined))
+
+
+
+
+```
+
+Change here to calculate the sporesizes for either parks or roofs.
+```{r}
+SSU_object <- SSU_roof
+#SSU_object <- SSU_park
+```
+
+
+```{r}
+# calculate otus that are only present in this section of the dataset (roof or park)
+otus_counts <- rowSums(otu_table(SSU_object))
+otus_to_keep <- names(otus_counts)[otus_counts > 0]
+
+
+# Prune the phyloseq object to keep only those OTUs
+SSU_object <- prune_taxa(otus_to_keep, SSU_phyloseq)
+
+tax_df <- data.frame(tax_table(SSU_object))
+
+#manually change "?" to NA and also glomus sensu lato to NA.
+tax_df <- tax_df %>% 
+  data.frame() %>%
+  dplyr::select(-Species) %>%
+  mutate(across(everything(), ~na_if(., "?"))) %>%
+  mutate(Genus = if_else(Genus == "Glomus_sensu_lato", NA_character_, Genus))
+
+#join by genus if OTU contains genus rank
+spore_tax_joined <- left_join(x =tax_df,y = genus_means,by="Genus")
+
+
+# If there are any NA values in the join column from ‘Genus',
+# perform left join with 'Family'
+if (any(is.na(spore_tax_joined$Genus))) {
+  spore_tax_joined <- left_join(spore_tax_joined, family_means, by = "Family")
+
+
+#if (any(is.na(spore_tax_joined$Family))) {
+#  spore_tax_joined <- left_join(spore_tax_joined, order_means, by = "Order")
+}
+
+#make a df with volumes per rank combined 
+spore_tax_joined_cb <- spore_tax_joined %>%
+  rename(mean_volume_genus = mean_vol.x,
+         mean_volume_family = mean_vol.y) %>%
+         #mean_volume_order = mean_vol)
+  mutate(mean_volume_com = ifelse(!is.na(mean_volume_genus), mean_volume_genus, mean_volume_family))
+                                  #ifelse(!is.na(mean_volume_family), mean_volume_family, 
+                                         #mean_volume_order)))
+
+spore_tax_joined_cb %>%
+  mutate(Family = if_else(is.na(Family), "Order", Family)) %>%
+  ggplot(aes(x = log(mean_volume_com), y = reorder(Family, mean_volume_com))) +
+  stat_summary() + 
+  theme_minimal() +
+  labs(x = "Mean volume log (um) ", y = "Family")
+
+spore_tax_no_scut <- spore_tax_joined_cb %>%
+  filter(Genus != "Scutellospora" )
+```
+
+change here again 
+```{r}
+taxvol_roof <- spore_tax_no_scut
+#taxvol_park <- spore_tax_no_scut
+```
+
+
+```{r}
+#manually create a dataset in long format 
+ttest_tibble <- tibble(
+  mean_volume = c(rescale(spore_database_genus$volume_combined)), 
+                  rescale(c(taxvol_roof$mean_volume_com, 
+                  taxvol_park$mean_volume_com)),
+  dataset = c(rep("full_dataset", length(spore_database_genus$volume_combined)), 
+              rep("urban", length(taxvol_roof$mean_volume_com)), 
+              rep("urban", length(taxvol_park$mean_volume_com))))
+
+
+
+#calculate the log means of each dataset
+log_means <- ttest_tibble %>%
+  group_by(dataset) %>%
+  na.omit() %>%
+  summarise(log_mean_volume = mean(log(mean_volume)))
+
+#visualise distribution
+ttest_tibble %>%
+  ggplot(aes(x = rescale(log(mean_volume)), fill = dataset)) + 
+  geom_density(alpha = 0.1) +
+  scale_fill_brewer()
+  #geom_vline(aes(xintercept=log_means$log_mean_volume[2]), colour = "lightblue", size = 0.8) +
+  #geom_vline(aes(xintercept=log_means$log_mean_volume[1]), colour = "pink", size = 0.8) +
+  theme_minimal()
+
+  
+
+```
+
+Kolmogorov-Smirnov test
+```{r}
+
+
+ks.test(spore_database_genus$volume_combined, c(taxvol_park$mean_volume_com, taxvol_roof$mean_volume_com))
+
+
+```
+
+  
